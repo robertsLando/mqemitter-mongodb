@@ -203,8 +203,14 @@ MQEmitterMongoDB.prototype._bulkInsert = async function () {
       operations.push({ insertOne: p.obj })
     }
 
-    await this._collection.bulkWrite(operations)
-    this._executingBulk = false
+    try {
+      await this._collection.bulkWrite(operations)
+    } catch (err) {
+      if (this.closed) return
+      throw err
+    } finally {
+      this._executingBulk = false
+    }
     this._bulkInsert()
   }
 }
@@ -256,18 +262,27 @@ MQEmitterMongoDB.prototype.close = function (cb) {
   this.closed = true
 
   const that = this
-  MQEmitter.prototype.close.call(this, async function () {
-    if (that._opts.db) {
-      cb()
-    } else {
-      that._client.close().then(() => {
-        process.nextTick(cb)
-      }).catch(err => {
-        that.status.emit('error', err)
-        process.nextTick(cb, err)
-      })
+
+  // wait for in-flight bulk insert to finish before closing client
+  function waitAndClose () {
+    if (that._executingBulk) {
+      setTimeout(waitAndClose, 10)
+      return
     }
-  })
+    MQEmitter.prototype.close.call(that, async function () {
+      if (that._opts.db) {
+        cb()
+      } else {
+        that._client.close().then(() => {
+          process.nextTick(cb)
+        }).catch(err => {
+          that.status.emit('error', err)
+          process.nextTick(cb, err)
+        })
+      }
+    })
+  }
+  waitAndClose()
 
   return this
 }
